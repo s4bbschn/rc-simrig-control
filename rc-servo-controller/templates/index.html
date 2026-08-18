@@ -160,6 +160,47 @@ button:hover { background: #2563eb; }
   </div>
 </div>
 
+<!-- Force Feedback -->
+<div class="card">
+  <h2>🎮 Force Feedback (IMU)</h2>
+  <div class="chk"><input type="checkbox" id="ffb-enabled"><label for="ffb-enabled">FFB aktivieren</label></div>
+
+  <label>Sensor</label>
+  <select id="ffb-sensor" class="platform-select" style="width:100%;padding:7px;border-radius:5px;border:1px solid #334155;background:#0f172a;color:#e5e7eb;font-size:0.88em;">
+    <option value="mpu6050">MPU6050</option>
+    <option value="mpu9250">MPU9250 / ICM-20948</option>
+  </select>
+
+  <label>Yaw Gain (Driftgefühl)</label>
+  <div class="rng"><input type="range" id="ffb-yaw" min="0" max="30" value="10" step="1"><span class="v" id="ffb-yaw-v">1.0</span></div>
+  <label>Lateral-G Gain (Querkraft)</label>
+  <div class="rng"><input type="range" id="ffb-lat" min="0" max="20" value="5" step="1"><span class="v" id="ffb-lat-v">0.5</span></div>
+  <label>Damping (Lenkwiderstand)</label>
+  <div class="rng"><input type="range" id="ffb-damp" min="0" max="10" value="3" step="1"><span class="v" id="ffb-damp-v">0.3</span></div>
+  <label>Deadzone (°/s)</label>
+  <div class="rng"><input type="range" id="ffb-dz" min="0" max="20" value="2" step="1"><span class="v" id="ffb-dz-v">2</span></div>
+  <label>Max Force</label>
+  <div class="rng"><input type="range" id="ffb-max" min="1" max="10" value="8" step="1"><span class="v" id="ffb-max-v">0.8</span></div>
+  <label>Smoothing</label>
+  <div class="rng"><input type="range" id="ffb-smooth" min="0" max="10" value="3" step="1"><span class="v" id="ffb-smooth-v">0.3</span></div>
+
+  <div class="servo-out" style="margin-top:14px;">
+    <label>Live IMU</label>
+    <div class="servo-nums">
+      <span>Yaw: <span id="ffb-live-yaw" style="color:#f59e0b">—</span> °/s</span>
+      <span>Lat-G: <span id="ffb-live-lat" style="color:#f59e0b">—</span></span>
+      <span>Force: <span id="ffb-live-force" style="color:#f59e0b">—</span></span>
+    </div>
+    <div class="servo-track"><div class="mid"></div><div class="fill" id="ffb-bar"></div></div>
+  </div>
+
+  <div style="margin-top:10px;display:flex;gap:10px;">
+    <button onclick="ffbCalibrate()" style="flex:1;background:#0f172a;color:#f59e0b;border:1px solid #f59e0b44;padding:8px;border-radius:5px;cursor:pointer;">Kalibrieren</button>
+    <button onclick="ffbSave()" style="flex:1;background:#f59e0b;color:#0f172a;font-weight:600;padding:8px;border-radius:5px;cursor:pointer;">FFB Speichern</button>
+  </div>
+  <div class="status" id="ffb-status" style="color:#f59e0b;"></div>
+</div>
+
 <div class="card">
   <button class="btn-save" onclick="saveAll()">💾 Speichern</button>
   <div class="status" id="status"></div>
@@ -179,6 +220,7 @@ async function api(url, body) {
 async function init() {
   cfg = await api("/api/config");
   fillForm();
+  fillFFB();
   await scanDevices();
   setInterval(poll, 80);
 }
@@ -244,6 +286,7 @@ async function poll() {
     const d = await api("/api/live");
     updateAxes(d.axes || {});
     updateServo(d.servo || {});
+    updateFFB(d.ffb || {});
   } catch(e) {}
 }
 
@@ -365,6 +408,66 @@ async function saveAll() {
 function status(msg) {
   const e = el("status"); e.textContent = msg;
   setTimeout(() => e.textContent = "", 2500);
+}
+
+// --- FFB ---
+function fillFFB() {
+  const f = cfg.ffb || {};
+  el("ffb-enabled").checked = f.enabled || false;
+  el("ffb-sensor").value = f.sensor_type || "mpu6050";
+  rng("ffb-yaw", (f.yaw_gain || 1.0) * 10, v => (v/10).toFixed(1));
+  rng("ffb-lat", (f.lateral_gain || 0.5) * 10, v => (v/10).toFixed(1));
+  rng("ffb-damp", (f.damping || 0.3) * 10, v => (v/10).toFixed(1));
+  rng("ffb-dz", f.deadzone || 2, v => v);
+  rng("ffb-max", (f.max_force || 0.8) * 10, v => (v/10).toFixed(1));
+  rng("ffb-smooth", (f.smoothing || 0.3) * 10, v => (v/10).toFixed(1));
+}
+
+function gatherFFB() {
+  return {
+    enabled: el("ffb-enabled").checked,
+    sensor_type: el("ffb-sensor").value,
+    yaw_gain: +el("ffb-yaw").value / 10,
+    lateral_gain: +el("ffb-lat").value / 10,
+    damping: +el("ffb-damp").value / 10,
+    deadzone: +el("ffb-dz").value,
+    max_force: +el("ffb-max").value / 10,
+    smoothing: +el("ffb-smooth").value / 10,
+  };
+}
+
+async function ffbSave() {
+  const ffbCfg = gatherFFB();
+  await api("/api/ffb/config", ffbCfg);
+  cfg.ffb = ffbCfg;
+  ffbStatus("FFB gespeichert");
+}
+
+async function ffbCalibrate() {
+  ffbStatus("Kalibriere...");
+  const r = await api("/api/ffb/calibrate", {});
+  ffbStatus(r.status === "ok" ? "Kalibriert!" : "Fehler: " + (r.message || ""));
+}
+
+function ffbStatus(msg) {
+  const e = el("ffb-status"); e.textContent = msg;
+  setTimeout(() => e.textContent = "", 3000);
+}
+
+function updateFFB(data) {
+  if (!data) return;
+  const yaw = el("ffb-live-yaw"), lat = el("ffb-live-lat"), force = el("ffb-live-force");
+  const bar = el("ffb-bar");
+  if (data.yaw_rate !== undefined) yaw.textContent = data.yaw_rate.toFixed(1);
+  if (data.lateral_g !== undefined) lat.textContent = data.lateral_g.toFixed(3);
+  if (data.current_force !== undefined) {
+    force.textContent = data.current_force.toFixed(3);
+    // Bar: Mitte=0, links=negativ, rechts=positiv
+    const pct = (data.current_force + 1) / 2 * 100; // -1..1 → 0..100
+    bar.style.left = Math.min(pct, 50) + "%";
+    bar.style.width = Math.abs(pct - 50) + "%";
+    bar.style.background = pct >= 50 ? "#f59e0b" : "#ef4444";
+  }
 }
 
 init();

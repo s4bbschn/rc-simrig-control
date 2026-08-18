@@ -21,6 +21,8 @@
 #include <ESP32Servo.h>
 #include <ArduinoOTA.h>
 #include <ESPmDNS.h>
+#include <Wire.h>
+#include <MPU6050.h>
 
 // ============================================================
 // Pin-Konfiguration
@@ -28,6 +30,11 @@
 #define SERVO_STEERING_PIN  16   // GPIO für Lenkservo
 #define SERVO_THROTTLE_PIN  19   // GPIO für ESC (Throttle)
 #define LED_STATUS_PIN      2    // Onboard-LED für Status
+
+// IMU (MPU6050 / MPU9250) — I²C
+#define IMU_SDA_PIN         21   // Standard I²C SDA
+#define IMU_SCL_PIN         22   // Standard I²C SCL
+#define IMU_SEND_INTERVAL   10   // IMU-Daten alle 10ms senden (100Hz)
 
 // ============================================================
 // PWM-Einstellungen
@@ -119,6 +126,29 @@ enum TraxxasReverseState {
 };
 TraxxasReverseState reverseState = REVERSE_IDLE;
 unsigned long reverseStateTime = 0;
+
+// ============================================================
+// IMU (MPU6050 / MPU9250)
+// ============================================================
+MPU6050 mpu;
+bool imuAvailable = false;
+unsigned long lastImuSend = 0;
+
+// IMU-Rohwerte
+float imuYawRate = 0.0f;      // Gierrate (°/s) — Rotation um Hochachse
+float imuLateralG = 0.0f;     // Querbeschleunigung (g)
+float imuLongitudinalG = 0.0f;// Längsbeschleunigung (g)
+float imuPitch = 0.0f;        // Nick (°)
+float imuRoll = 0.0f;         // Roll (°)
+
+// Gyro-Kalibrierung (Offset wird beim Start gemessen)
+float gyroOffsetZ = 0.0f;
+float accelOffsetX = 0.0f;
+float accelOffsetY = 0.0f;
+
+// Sensorskalierung MPU6050: ±250°/s = 131 LSB/(°/s), ±2g = 16384 LSB/g
+const float GYRO_SCALE = 131.0f;   // für ±250°/s
+const float ACCEL_SCALE = 16384.0f; // für ±2g
 
 // ============================================================
 // Hilfsfunktionen
@@ -317,6 +347,12 @@ void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
 // REST API (für zukünftige Pi-Integration)
 // ============================================================
 
+// Forward declarations
+void calibrateIMU();
+bool initIMU();
+void readIMU();
+void sendIMUData();
+
 void setupAPI() {
     // Status abrufen
     server.on("/api/status", HTTP_GET, [](AsyncWebServerRequest* request) {
@@ -407,6 +443,104 @@ void setupAPI() {
             }
         }
     );
+    
+    // IMU Status
+    server.on("/api/imu", HTTP_GET, [](AsyncWebServerRequest* request) {
+        JsonDocument doc;
+        doc["available"] = imuAvailable;
+        doc["yaw_rate"] = imuYawRate;
+        doc["lateral_g"] = imuLateralG;
+        doc["longitudinal_g"] = imuLongitudinalG;
+        String json;
+        serializeJson(doc, json);
+        request->send(200, "application/json", json);
+    });
+    
+    // IMU Kalibrierung
+    server.on("/api/imu/calibrate", HTTP_POST, [](AsyncWebServerRequest* request) {
+        if (imuAvailable) {
+            calibrateIMU();
+            request->send(200, "application/json", "{\"status\":\"ok\"}");
+        } else {
+            request->send(503, "application/json", "{\"error\":\"IMU not available\"}");
+        }
+    });
+}
+
+// ============================================================
+// IMU Funktionen
+// ============================================================
+
+void calibrateIMU() {
+    // Misst den Gyro/Accel-Offset im Ruhezustand (Auto muss stillstehen!)
+    Serial.println("[IMU] Kalibrierung... (Auto stillhalten!)");
+    
+    float sumGz = 0, sumAx = 0, sumAy = 0;
+    const int samples = 200;
+    
+    for (int i = 0; i < samples; i++) {
+        int16_t ax, ay, az, gx, gy, gz;
+        mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+        sumGz += gz / GYRO_SCALE;
+        sumAx += ax / ACCEL_SCALE;
+        sumAy += ay / ACCEL_SCALE;
+        delay(5);
+    }
+    
+    gyroOffsetZ = sumGz / samples;
+    accelOffsetX = sumAx / samples;
+    accelOffsetY = sumAy / samples;
+    
+    Serial.printf("[IMU] Kalibriert: gyroZ=%.2f, accelX=%.3f, accelY=%.3f\n",
+                  gyroOffsetZ, accelOffsetX, accelOffsetY);
+}
+
+bool initIMU() {
+    Wire.begin(IMU_SDA_PIN, IMU_SCL_PIN);
+    Wire.setClock(400000);  // 400kHz I²C
+    
+    mpu.initialize();
+    
+    if (!mpu.testConnection()) {
+        Serial.println("[IMU] MPU6050 NICHT gefunden! FFB deaktiviert.");
+        return false;
+    }
+    
+    Serial.println("[IMU] MPU6050 erkannt");
+    
+    // Konfiguration: ±250°/s Gyro, ±2g Accel, DLPF 42Hz
+    mpu.setFullScaleGyroRange(MPU6050_GYRO_FS_250);
+    mpu.setFullScaleAccelRange(MPU6050_ACCEL_FS_2);
+    mpu.setDLPFMode(MPU6050_DLPF_BW_42);  // Low-Pass Filter 42Hz
+    
+    calibrateIMU();
+    return true;
+}
+
+void readIMU() {
+    int16_t ax, ay, az, gx, gy, gz;
+    mpu.getMotion6(&ax, &ay, &az, &gx, &gy, &gz);
+    
+    // Gierrate (Yaw) — Rotation um Z-Achse (Hochachse des Autos)
+    imuYawRate = (gz / GYRO_SCALE) - gyroOffsetZ;
+    
+    // Querbeschleunigung (Y-Achse des Sensors = seitlich am Auto)
+    imuLateralG = (ay / ACCEL_SCALE) - accelOffsetY;
+    
+    // Längsbeschleunigung (X-Achse = vorwärts/rückwärts)
+    imuLongitudinalG = (ax / ACCEL_SCALE) - accelOffsetX;
+}
+
+void sendIMUData() {
+    if (!imuAvailable || ws.count() == 0) return;
+    
+    // Kompaktes JSON für minimale Latenz
+    char json[128];
+    snprintf(json, sizeof(json),
+        "{\"type\":\"imu\",\"yaw\":%.1f,\"lat\":%.3f,\"lon\":%.3f}",
+        imuYawRate, imuLateralG, imuLongitudinalG);
+    
+    ws.textAll(json);
 }
 
 // ============================================================
@@ -425,6 +559,9 @@ void setup() {
     if (!SPIFFS.begin(true)) {
         Serial.println("[ERROR] SPIFFS Mount fehlgeschlagen!");
     }
+    
+    // IMU initialisieren
+    imuAvailable = initIMU();
     
     // Servos initialisieren
     ESP32PWM::allocateTimer(0);
@@ -642,6 +779,13 @@ void loop() {
     if (!escArmed && millis() - lastBlink > 500) {
         digitalWrite(LED_STATUS_PIN, !digitalRead(LED_STATUS_PIN));
         lastBlink = millis();
+    }
+    
+    // IMU lesen und streamen (100Hz)
+    if (imuAvailable && millis() - lastImuSend >= IMU_SEND_INTERVAL) {
+        readIMU();
+        sendIMUData();
+        lastImuSend = millis();
     }
     
     delay(1);  // CPU entlasten

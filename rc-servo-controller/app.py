@@ -18,6 +18,16 @@ try:
 except ImportError as e:
     print(f"[INFO] ESP32 Client nicht verfügbar: {e}")
 
+# Force Feedback Controller
+HAS_FFB = False
+ffb_controller = None
+try:
+    from ffb_controller import FFBController
+    HAS_FFB = True
+    print("[OK] FFB Controller verfügbar")
+except ImportError as e:
+    print(f"[INFO] FFB nicht verfügbar: {e}")
+
 # Servo-Steuerung (nur auf Raspberry Pi, als Fallback wenn kein ESP32)
 HAS_GPIO = False
 servo_ctrl = None
@@ -125,6 +135,9 @@ def on_axis_input(axis_code, value):
     if mapped is not None and int(mapped) == int(axis_code):
         result = compute_servo(value, s)
         live_servo["steering"] = result
+        # FFB: aktuellen Lenkwinkel mitteilen
+        if ffb_controller:
+            ffb_controller.on_steering_input(result["value"])
         # ESP32: Lenkwert senden
         if esp32_client and esp32_client.connected:
             esp32_client.set_steering(result["value"])
@@ -188,9 +201,31 @@ def setup_esp32(cfg):
     host = esp_cfg.get("host", "192.168.4.1")
     hostname = esp_cfg.get("hostname", "rc-esc.local")
     port = esp_cfg.get("port", 80)
-    esp32_client = ESP32Client(host=host, port=port, hostname=hostname)
+    esp32_client = ESP32Client(host=host, port=port, hostname=hostname, on_imu=on_imu_data)
     esp32_client.connect()
     print(f"[ESP32] Client gestartet → Hostname: {hostname} / Fallback: {host}:{port}")
+
+
+def on_imu_data(data):
+    """Callback: IMU-Daten vom ESP32 empfangen → an FFB-Controller weiterleiten."""
+    if ffb_controller:
+        yaw = data.get("yaw", 0.0)
+        lat = data.get("lat", 0.0)
+        lon = data.get("lon", 0.0)
+        ffb_controller.on_imu_data(yaw, lat, lon)
+
+
+def setup_ffb(cfg):
+    """Force Feedback Controller initialisieren."""
+    global ffb_controller
+    if not HAS_FFB:
+        return
+    ffb_cfg = cfg.get("ffb", {})
+    if not ffb_cfg.get("enabled", False):
+        print("[FFB] Deaktiviert per Config")
+        return
+    ffb_controller = FFBController(ffb_cfg)
+    ffb_controller.start()
 
 
 def start_input(cfg):
@@ -239,9 +274,10 @@ def api_devices():
 
 @app.route("/api/live")
 def api_live():
-    """Alle Live-Daten in einem Request: Achsen + Servo-Output + ESP32-Status."""
+    """Alle Live-Daten in einem Request: Achsen + Servo-Output + ESP32-Status + FFB."""
     esp32_status = esp32_client.status if esp32_client else {"connected": False}
-    return jsonify({"axes": live_axes, "servo": live_servo, "esp32": esp32_status})
+    ffb_status = ffb_controller.status if ffb_controller else {"enabled": False, "active": False}
+    return jsonify({"axes": live_axes, "servo": live_servo, "esp32": esp32_status, "ffb": ffb_status})
 
 
 @app.route("/api/esp32/status")
@@ -281,12 +317,55 @@ def api_esp32_platform():
     return jsonify({"status": "error", "message": "Nicht verbunden"}), 503
 
 
+# --- FFB API ---
+
+@app.route("/api/ffb/status")
+def api_ffb_status():
+    """FFB Status."""
+    if ffb_controller:
+        return jsonify(ffb_controller.status)
+    return jsonify({"enabled": False, "active": False})
+
+
+@app.route("/api/ffb/config", methods=["POST"])
+def api_ffb_config():
+    """FFB Einstellungen live aktualisieren."""
+    data = request.json
+    with config_lock:
+        cfg = load_config()
+        if "ffb" not in cfg:
+            cfg["ffb"] = {}
+        cfg["ffb"].update(data)
+        save_config(cfg)
+    if ffb_controller:
+        ffb_controller.update_config(cfg["ffb"])
+    elif data.get("enabled") and HAS_FFB:
+        setup_ffb(cfg)
+    return jsonify({"status": "ok"})
+
+
+@app.route("/api/ffb/calibrate", methods=["POST"])
+def api_ffb_calibrate():
+    """IMU-Kalibrierung am ESP32 auslösen."""
+    if esp32_client and esp32_client.connected:
+        import urllib.request
+        try:
+            host = esp32_client.host
+            req = urllib.request.Request(f"http://{host}/api/imu/calibrate", method="POST")
+            urllib.request.urlopen(req, timeout=5)
+            return jsonify({"status": "ok"})
+        except Exception as e:
+            return jsonify({"status": "error", "message": str(e)}), 500
+    return jsonify({"status": "error", "message": "ESP32 nicht verbunden"}), 503
+
+
 # --- Start ---
 
 if __name__ == "__main__":
     cfg = load_config()
     setup_servos(cfg)
     setup_esp32(cfg)
+    setup_ffb(cfg)
     start_input(cfg)
     print(f"\n🏎️  RC Servo Controller → http://localhost:8080\n")
     app.run(host="0.0.0.0", port=8080, debug=False)

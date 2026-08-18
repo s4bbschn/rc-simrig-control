@@ -9,12 +9,13 @@ import websocket
 class ESP32Client:
     """Verbindet sich per WebSocket zum ESP32 und sendet Steering/Throttle-Befehle."""
 
-    def __init__(self, host="192.168.4.1", port=80, hostname="rc-esc.local", on_status=None):
+    def __init__(self, host="192.168.4.1", port=80, hostname="rc-esc.local", on_status=None, on_imu=None):
         self.host = host
         self.hostname = hostname
         self.port = port
         self.url = None  # Wird beim Connect bestimmt
         self.on_status = on_status  # Callback für Status-Updates
+        self.on_imu = on_imu        # Callback für IMU-Daten
 
         self.ws = None
         self.connected = False
@@ -116,6 +117,9 @@ class ESP32Client:
                     self.on_status(data)
             elif msg_type == "ack":
                 self.armed = data.get("armed", False)
+            elif msg_type == "imu":
+                if self.on_imu:
+                    self.on_imu(data)
             elif msg_type == "failsafe":
                 print(f"[ESP32] FAILSAFE: {data.get('message')}")
                 self._last_steering = None

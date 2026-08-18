@@ -7,6 +7,17 @@
     "port": 80,
     "platform": 0
   },
+  "ffb": {
+    "enabled": false,
+    "sensor_type": "mpu6050",
+    "device_path": "",
+    "yaw_gain": 1.0,
+    "lateral_gain": 0.5,
+    "damping": 0.3,
+    "deadzone": 2.0,
+    "max_force": 0.8,
+    "smoothing": 0.3
+  },
   "steering": {
     "servo_gpio": 18,
     "input_axis": 0,
