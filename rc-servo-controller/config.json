@@ -18,6 +18,25 @@
     "max_force": 0.8,
     "smoothing": 0.3
   },
+  "drive_assist": {
+    "mode": 0,
+    "stability": {
+      "counterSteerGain": 1.0,
+      "throttleLimitGain": 0.5,
+      "yawThreshold": 15.0,
+      "responseSpeed": 0.5
+    },
+    "autopilot": {
+      "yawRateMax": 180.0,
+      "steerP": 2.0,
+      "steerI": 0.1,
+      "steerD": 0.5,
+      "thrP": 1.5,
+      "thrI": 0.05,
+      "thrD": 0.3,
+      "baseThrottle": 0.3
+    }
+  },
   "steering": {
     "servo_gpio": 18,
     "input_axis": 0,

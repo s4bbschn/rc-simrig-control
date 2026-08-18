@@ -160,6 +160,53 @@ button:hover { background: #2563eb; }
   </div>
 </div>
 
+<!-- Drive Mode / Drift Assist -->
+<div class="card">
+  <h2>🏁 Drive Mode</h2>
+  <div style="display:flex;gap:8px;margin-bottom:12px;">
+    <button class="btn" id="mode-0" onclick="setMode(0)" style="flex:1;padding:10px;border-radius:6px;cursor:pointer;font-weight:600;border:2px solid #38bdf8;background:#0f172a;color:#38bdf8;">Direct</button>
+    <button class="btn" id="mode-1" onclick="setMode(1)" style="flex:1;padding:10px;border-radius:6px;cursor:pointer;font-weight:600;border:2px solid #4ade80;background:#0f172a;color:#4ade80;">Stability</button>
+    <button class="btn" id="mode-2" onclick="setMode(2)" style="flex:1;padding:10px;border-radius:6px;cursor:pointer;font-weight:600;border:2px solid #f59e0b;background:#0f172a;color:#f59e0b;">Autopilot</button>
+  </div>
+  <div id="mode-desc" style="font-size:0.78em;color:#94a3b8;margin-bottom:10px;">Direkte Steuerung — Input geht 1:1 an Servo/ESC.</div>
+
+  <!-- Stability Params -->
+  <div id="panel-stability" style="display:none;">
+    <label>Counter-Steer Gain</label>
+    <div class="rng"><input type="range" id="stab-csg" min="0" max="30" value="10" step="1"><span class="v" id="stab-csg-v">1.0</span></div>
+    <label>Throttle Limit</label>
+    <div class="rng"><input type="range" id="stab-tlg" min="0" max="10" value="5" step="1"><span class="v" id="stab-tlg-v">0.5</span></div>
+    <label>Yaw Threshold (°/s)</label>
+    <div class="rng"><input type="range" id="stab-yt" min="5" max="50" value="15" step="1"><span class="v" id="stab-yt-v">15</span></div>
+    <label>Response Speed</label>
+    <div class="rng"><input type="range" id="stab-rs" min="1" max="10" value="5" step="1"><span class="v" id="stab-rs-v">0.5</span></div>
+    <button onclick="saveStability()" style="width:100%;margin-top:8px;background:#4ade80;color:#0f172a;font-weight:600;padding:8px;border:none;border-radius:5px;cursor:pointer;">Stability speichern</button>
+  </div>
+
+  <!-- Autopilot Params -->
+  <div id="panel-autopilot" style="display:none;">
+    <label>Max Yaw-Rate (°/s)</label>
+    <div class="rng"><input type="range" id="ap-yr" min="50" max="300" value="180" step="10"><span class="v" id="ap-yr-v">180</span></div>
+    <label>Steering P</label>
+    <div class="rng"><input type="range" id="ap-sp" min="1" max="50" value="20" step="1"><span class="v" id="ap-sp-v">2.0</span></div>
+    <label>Steering I</label>
+    <div class="rng"><input type="range" id="ap-si" min="0" max="20" value="1" step="1"><span class="v" id="ap-si-v">0.1</span></div>
+    <label>Steering D</label>
+    <div class="rng"><input type="range" id="ap-sd" min="0" max="20" value="5" step="1"><span class="v" id="ap-sd-v">0.5</span></div>
+    <label>Throttle P</label>
+    <div class="rng"><input type="range" id="ap-tp" min="1" max="50" value="15" step="1"><span class="v" id="ap-tp-v">1.5</span></div>
+    <label>Throttle I</label>
+    <div class="rng"><input type="range" id="ap-ti" min="0" max="10" value="1" step="1"><span class="v" id="ap-ti-v">0.05</span></div>
+    <label>Throttle D</label>
+    <div class="rng"><input type="range" id="ap-td" min="0" max="20" value="3" step="1"><span class="v" id="ap-td-v">0.3</span></div>
+    <label>Base Throttle</label>
+    <div class="rng"><input type="range" id="ap-bt" min="1" max="10" value="3" step="1"><span class="v" id="ap-bt-v">0.3</span></div>
+    <button onclick="saveAutopilot()" style="width:100%;margin-top:8px;background:#f59e0b;color:#0f172a;font-weight:600;padding:8px;border:none;border-radius:5px;cursor:pointer;">Autopilot speichern</button>
+  </div>
+
+  <div class="status" id="mode-status" style="margin-top:6px;"></div>
+</div>
+
 <!-- Force Feedback -->
 <div class="card">
   <h2>🎮 Force Feedback (IMU)</h2>
@@ -220,6 +267,7 @@ async function api(url, body) {
 async function init() {
   cfg = await api("/api/config");
   fillForm();
+  fillDriveAssist();
   fillFFB();
   await scanDevices();
   setInterval(poll, 80);
@@ -407,6 +455,90 @@ async function saveAll() {
 
 function status(msg) {
   const e = el("status"); e.textContent = msg;
+  setTimeout(() => e.textContent = "", 2500);
+}
+
+// --- Drive Mode ---
+let currentMode = 0;
+const modeDescs = [
+  "Direkte Steuerung — Input geht 1:1 an Servo/ESC.",
+  "Stabilitäts-Assist — Korrigiert bei Übersteuern, limitiert Gas.",
+  "Drift-Autopilot — Lenkrad = Soll-Driftwinkel, Gas = Intensität. System regelt aktiv."
+];
+
+function setMode(m) {
+  currentMode = m;
+  api("/api/esp32/mode", {mode: m});
+  updateModeUI();
+  modeStatus(["Direct", "Stability", "Autopilot"][m] + " aktiviert");
+}
+
+function updateModeUI() {
+  [0,1,2].forEach(i => {
+    const btn = el(`mode-${i}`);
+    if (i === currentMode) {
+      btn.style.background = i===0 ? "#38bdf8" : i===1 ? "#4ade80" : "#f59e0b";
+      btn.style.color = "#0f172a";
+    } else {
+      btn.style.background = "#0f172a";
+      btn.style.color = i===0 ? "#38bdf8" : i===1 ? "#4ade80" : "#f59e0b";
+    }
+  });
+  el("mode-desc").textContent = modeDescs[currentMode];
+  el("panel-stability").style.display = currentMode === 1 ? "block" : "none";
+  el("panel-autopilot").style.display = currentMode === 2 ? "block" : "none";
+}
+
+function fillDriveAssist() {
+  const da = cfg.drive_assist || {};
+  currentMode = da.mode || 0;
+  updateModeUI();
+  // Stability
+  const s = da.stability || {};
+  rng("stab-csg", (s.counterSteerGain || 1.0) * 10, v => (v/10).toFixed(1));
+  rng("stab-tlg", (s.throttleLimitGain || 0.5) * 10, v => (v/10).toFixed(1));
+  rng("stab-yt", s.yawThreshold || 15, v => v);
+  rng("stab-rs", (s.responseSpeed || 0.5) * 10, v => (v/10).toFixed(1));
+  // Autopilot
+  const a = da.autopilot || {};
+  rng("ap-yr", a.yawRateMax || 180, v => v);
+  rng("ap-sp", (a.steerP || 2.0) * 10, v => (v/10).toFixed(1));
+  rng("ap-si", (a.steerI || 0.1) * 10, v => (v/10).toFixed(2));
+  rng("ap-sd", (a.steerD || 0.5) * 10, v => (v/10).toFixed(1));
+  rng("ap-tp", (a.thrP || 1.5) * 10, v => (v/10).toFixed(1));
+  rng("ap-ti", (a.thrI || 0.05) * 10, v => (v/10).toFixed(2));
+  rng("ap-td", (a.thrD || 0.3) * 10, v => (v/10).toFixed(1));
+  rng("ap-bt", (a.baseThrottle || 0.3) * 10, v => (v/10).toFixed(1));
+}
+
+async function saveStability() {
+  const params = {
+    counterSteerGain: +el("stab-csg").value / 10,
+    throttleLimitGain: +el("stab-tlg").value / 10,
+    yawThreshold: +el("stab-yt").value,
+    responseSpeed: +el("stab-rs").value / 10
+  };
+  await api("/api/esp32/stability_params", params);
+  modeStatus("Stability gespeichert");
+}
+
+async function saveAutopilot() {
+  const params = {
+    yawRateMax: +el("ap-yr").value,
+    steerP: +el("ap-sp").value / 10,
+    steerI: +el("ap-si").value / 10,
+    steerD: +el("ap-sd").value / 10,
+    thrP: +el("ap-tp").value / 10,
+    thrI: +el("ap-ti").value / 10,
+    thrD: +el("ap-td").value / 10,
+    baseThrottle: +el("ap-bt").value / 10
+  };
+  await api("/api/esp32/autopilot_params", params);
+  modeStatus("Autopilot gespeichert");
+}
+
+function modeStatus(msg) {
+  const e = el("mode-status"); e.textContent = msg;
   setTimeout(() => e.textContent = "", 2500);
 }
 

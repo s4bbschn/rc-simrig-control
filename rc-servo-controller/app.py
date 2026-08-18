@@ -205,6 +205,24 @@ def setup_esp32(cfg):
     esp32_client.connect()
     print(f"[ESP32] Client gestartet → Hostname: {hostname} / Fallback: {host}:{port}")
 
+    # Drive Assist Parameter beim Start senden (verzögert, nach Verbindungsaufbau)
+    def _send_assist_params():
+        import time
+        time.sleep(3)  # Warten bis WS verbunden
+        da = cfg.get("drive_assist", {})
+        if esp32_client and esp32_client.connected:
+            mode = da.get("mode", 0)
+            esp32_client.set_drive_mode(mode)
+            stability = da.get("stability", {})
+            if stability:
+                esp32_client.set_stability_params(stability)
+            autopilot = da.get("autopilot", {})
+            if autopilot:
+                esp32_client.set_autopilot_params(autopilot)
+            print(f"[ESP32] Drive-Assist Parameter gesendet (Mode: {mode})")
+
+    threading.Thread(target=_send_assist_params, daemon=True).start()
+
 
 def on_imu_data(data):
     """Callback: IMU-Daten vom ESP32 empfangen → an FFB-Controller weiterleiten."""
@@ -313,6 +331,51 @@ def api_esp32_platform():
     platform_id = data.get("platform", 0)
     if esp32_client and esp32_client.connected:
         esp32_client.set_platform(platform_id)
+        return jsonify({"status": "ok"})
+    return jsonify({"status": "error", "message": "Nicht verbunden"}), 503
+
+
+@app.route("/api/esp32/mode", methods=["POST"])
+def api_esp32_mode():
+    """Drive-Modus wechseln."""
+    data = request.json
+    mode = data.get("mode", 0)
+    if esp32_client and esp32_client.connected:
+        esp32_client.set_drive_mode(mode)
+        return jsonify({"status": "ok"})
+    return jsonify({"status": "error", "message": "Nicht verbunden"}), 503
+
+
+@app.route("/api/esp32/stability_params", methods=["POST"])
+def api_esp32_stability_params():
+    """Stability Assist Parameter setzen."""
+    data = request.json
+    if esp32_client and esp32_client.connected:
+        esp32_client.set_stability_params(data)
+        # In Config speichern
+        with config_lock:
+            cfg = load_config()
+            if "drive_assist" not in cfg:
+                cfg["drive_assist"] = {}
+            cfg["drive_assist"]["stability"] = data
+            save_config(cfg)
+        return jsonify({"status": "ok"})
+    return jsonify({"status": "error", "message": "Nicht verbunden"}), 503
+
+
+@app.route("/api/esp32/autopilot_params", methods=["POST"])
+def api_esp32_autopilot_params():
+    """Drift Autopilot Parameter setzen."""
+    data = request.json
+    if esp32_client and esp32_client.connected:
+        esp32_client.set_autopilot_params(data)
+        # In Config speichern
+        with config_lock:
+            cfg = load_config()
+            if "drive_assist" not in cfg:
+                cfg["drive_assist"] = {}
+            cfg["drive_assist"]["autopilot"] = data
+            save_config(cfg)
         return jsonify({"status": "ok"})
     return jsonify({"status": "error", "message": "Nicht verbunden"}), 503
 

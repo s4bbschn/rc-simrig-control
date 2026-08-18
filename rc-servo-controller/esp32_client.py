@@ -21,6 +21,8 @@ class ESP32Client:
         self.connected = False
         self.armed = False
         self.platform = "unknown"
+        self._drive_mode = 0
+        self._imu_available = False
 
         self._thread = None
         self._running = False
@@ -113,10 +115,13 @@ class ESP32Client:
             if msg_type == "status":
                 self.armed = data.get("armed", False)
                 self.platform = data.get("platform", "unknown")
+                self._drive_mode = data.get("mode", 0)
+                self._imu_available = data.get("imuAvailable", False)
                 if self.on_status:
                     self.on_status(data)
             elif msg_type == "ack":
                 self.armed = data.get("armed", False)
+                self._drive_mode = data.get("mode", self._drive_mode)
             elif msg_type == "imu":
                 if self.on_imu:
                     self.on_imu(data)
@@ -215,6 +220,22 @@ class ESP32Client:
         """ESC-Plattform wechseln (0=Traxxas, 1=Hobbywing, 2=Generic)."""
         self._send_raw({"cmd": "platform", "value": platform_id})
 
+    def set_drive_mode(self, mode: int):
+        """Drive-Modus wechseln (0=Direct, 1=Stability, 2=Autopilot)."""
+        self._send_raw({"cmd": "mode", "value": mode})
+
+    def set_stability_params(self, params: dict):
+        """Stability Assist Parameter setzen."""
+        msg = {"cmd": "stability_params"}
+        msg.update(params)
+        self._send_raw(msg)
+
+    def set_autopilot_params(self, params: dict):
+        """Drift Autopilot Parameter setzen."""
+        msg = {"cmd": "autopilot_params"}
+        msg.update(params)
+        self._send_raw(msg)
+
     @property
     def status(self) -> dict:
         return {
@@ -222,4 +243,6 @@ class ESP32Client:
             "armed": self.armed,
             "platform": self.platform,
             "host": self.host,
+            "drive_mode": self._drive_mode,
+            "imu_available": self._imu_available,
         }

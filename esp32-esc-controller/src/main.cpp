@@ -151,6 +151,92 @@ const float GYRO_SCALE = 131.0f;   // für ±250°/s
 const float ACCEL_SCALE = 16384.0f; // für ±2g
 
 // ============================================================
+// Drive Modes & Drift Assist
+// ============================================================
+enum DriveMode {
+    MODE_DIRECT = 0,      // Fahrer steuert direkt (Standard)
+    MODE_STABILITY = 1,   // Stabilitäts-Assist (Korrektur bei Übersteuern)
+    MODE_AUTOPILOT = 2,   // Drift-Autopilot (Input = Soll-Yaw-Rate)
+    MODE_COUNT
+};
+
+DriveMode currentDriveMode = MODE_DIRECT;
+
+// PID-Regler Struktur
+struct PIDController {
+    float kP;
+    float kI;
+    float kD;
+    float integral;
+    float lastError;
+    float output;
+    float maxIntegral;   // Anti-Windup
+    float maxOutput;
+    
+    void reset() { integral = 0; lastError = 0; output = 0; }
+    
+    float compute(float error, float dt) {
+        integral += error * dt;
+        // Anti-Windup
+        integral = constrain(integral, -maxIntegral, maxIntegral);
+        float derivative = (dt > 0) ? (error - lastError) / dt : 0;
+        lastError = error;
+        output = kP * error + kI * integral + kD * derivative;
+        output = constrain(output, -maxOutput, maxOutput);
+        return output;
+    }
+};
+
+// Stability Assist Parameter
+struct StabilityParams {
+    float counterSteerGain;   // Wie aggressiv gegengelenkt wird (0-2.0)
+    float throttleLimitGain;  // Wie stark Gas reduziert wird (0-1.0)
+    float yawThreshold;       // Ab welcher Yaw-Differenz (°/s) eingegriffen wird
+    float responseSpeed;      // Wie schnell der Assist reagiert (0-1.0)
+};
+
+StabilityParams stabilityParams = {
+    .counterSteerGain = 1.0f,
+    .throttleLimitGain = 0.5f,
+    .yawThreshold = 15.0f,
+    .responseSpeed = 0.5f
+};
+
+// Drift Autopilot Parameter
+struct AutopilotParams {
+    float yawRateMax;         // Maximale Soll-Yaw-Rate bei Vollanschlag (°/s)
+    float steeringPID_P;      // PID P für Lenkung
+    float steeringPID_I;      // PID I für Lenkung
+    float steeringPID_D;      // PID D für Lenkung
+    float throttlePID_P;      // PID P für Throttle
+    float throttlePID_I;      // PID I für Throttle
+    float throttlePID_D;      // PID D für Throttle
+    float baseThrottle;       // Basis-Gas im Drift (0-1.0)
+};
+
+AutopilotParams autopilotParams = {
+    .yawRateMax = 180.0f,     // ±180°/s bei Vollanschlag
+    .steeringPID_P = 2.0f,
+    .steeringPID_I = 0.1f,
+    .steeringPID_D = 0.5f,
+    .throttlePID_P = 1.5f,
+    .throttlePID_I = 0.05f,
+    .throttlePID_D = 0.3f,
+    .baseThrottle = 0.3f
+};
+
+// PID-Instanzen
+PIDController steeringPID = {2.0f, 0.1f, 0.5f, 0, 0, 0, 50.0f, 1000.0f};
+PIDController throttlePID = {1.5f, 0.05f, 0.3f, 0, 0, 0, 30.0f, 1000.0f};
+
+// Zeitstempel für dt-Berechnung
+unsigned long lastAssistUpdate = 0;
+
+// Assist-Output (wird im Smoothing-Loop verwendet)
+int assistSteeringOutput = 0;   // -1000..+1000
+int assistThrottleOutput = 0;   // -1000..+1000
+
+// ============================================================
 // Hilfsfunktionen
 // ============================================================
 
@@ -271,6 +357,8 @@ void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                 doc["platform"] = escProfiles[currentPlatform].name;
                 doc["steering"] = currentSteering;
                 doc["throttle"] = currentThrottle;
+                doc["mode"] = (int)currentDriveMode;
+                doc["imuAvailable"] = imuAvailable;
                 String json;
                 serializeJson(doc, json);
                 client->text(json);
@@ -321,15 +409,45 @@ void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                                       escProfiles[currentPlatform].name);
                     }
                 }
+                else if (strcmp(cmd, "mode") == 0) {
+                    int m = doc["value"] | 0;
+                    if (m >= 0 && m < MODE_COUNT) {
+                        currentDriveMode = (DriveMode)m;
+                        // PIDs zurücksetzen bei Moduswechsel
+                        steeringPID.reset();
+                        throttlePID.reset();
+                        Serial.printf("[MODE] Gewechselt zu: %d\n", m);
+                    }
+                }
+                else if (strcmp(cmd, "stability_params") == 0) {
+                    stabilityParams.counterSteerGain = doc["counterSteerGain"] | stabilityParams.counterSteerGain;
+                    stabilityParams.throttleLimitGain = doc["throttleLimitGain"] | stabilityParams.throttleLimitGain;
+                    stabilityParams.yawThreshold = doc["yawThreshold"] | stabilityParams.yawThreshold;
+                    stabilityParams.responseSpeed = doc["responseSpeed"] | stabilityParams.responseSpeed;
+                    Serial.println("[MODE] Stability-Parameter aktualisiert");
+                }
+                else if (strcmp(cmd, "autopilot_params") == 0) {
+                    autopilotParams.yawRateMax = doc["yawRateMax"] | autopilotParams.yawRateMax;
+                    autopilotParams.steeringPID_P = doc["steerP"] | autopilotParams.steeringPID_P;
+                    autopilotParams.steeringPID_I = doc["steerI"] | autopilotParams.steeringPID_I;
+                    autopilotParams.steeringPID_D = doc["steerD"] | autopilotParams.steeringPID_D;
+                    autopilotParams.throttlePID_P = doc["thrP"] | autopilotParams.throttlePID_P;
+                    autopilotParams.throttlePID_I = doc["thrI"] | autopilotParams.throttlePID_I;
+                    autopilotParams.throttlePID_D = doc["thrD"] | autopilotParams.throttlePID_D;
+                    autopilotParams.baseThrottle = doc["baseThrottle"] | autopilotParams.baseThrottle;
+                    Serial.println("[MODE] Autopilot-Parameter aktualisiert");
+                }
                 
-                // Nur bei arm/disarm/platform ein ack senden, NICHT bei steer/throttle
-                // (zu viele Antworten überlasten den WS-Buffer)
-                if (strcmp(cmd, "arm") == 0 || strcmp(cmd, "disarm") == 0 || strcmp(cmd, "platform") == 0) {
+                // Ack senden bei Befehlen die nicht hochfrequent sind
+                if (strcmp(cmd, "arm") == 0 || strcmp(cmd, "disarm") == 0 || 
+                    strcmp(cmd, "platform") == 0 || strcmp(cmd, "mode") == 0 ||
+                    strcmp(cmd, "stability_params") == 0 || strcmp(cmd, "autopilot_params") == 0) {
                     JsonDocument resp;
                     resp["type"] = "ack";
                     resp["steering"] = currentSteering;
                     resp["throttle"] = currentThrottle;
                     resp["armed"] = escArmed;
+                    resp["mode"] = (int)currentDriveMode;
                     String json;
                     serializeJson(resp, json);
                     client->text(json);
@@ -537,10 +655,146 @@ void sendIMUData() {
     // Kompaktes JSON für minimale Latenz
     char json[128];
     snprintf(json, sizeof(json),
-        "{\"type\":\"imu\",\"yaw\":%.1f,\"lat\":%.3f,\"lon\":%.3f}",
-        imuYawRate, imuLateralG, imuLongitudinalG);
+        "{\"type\":\"imu\",\"yaw\":%.1f,\"lat\":%.3f,\"lon\":%.3f,\"mode\":%d}",
+        imuYawRate, imuLateralG, imuLongitudinalG, (int)currentDriveMode);
     
     ws.textAll(json);
+}
+
+// ============================================================
+// Drive Mode: Stability Assist
+// ============================================================
+
+void computeStabilityAssist(float dt) {
+    // Stability Assist: Fahrer steuert direkt, System korrigiert bei Übersteuern.
+    // 
+    // Erwartete Yaw-Rate schätzen aus dem Lenkwinkel:
+    //   Bei Vollanschlag (±1000) erwarten wir ca. ±100°/s (skalierbar)
+    //   Je mehr Throttle, desto höher die Erwartung (Speed-Abhängigkeit)
+    
+    float steeringNorm = currentSteering / 1000.0f;  // -1..+1
+    float throttleNorm = max(0.0f, currentThrottle / 1000.0f);  // 0..1 (nur Vorwärts)
+    
+    // Erwartete Yaw-Rate basierend auf Lenkwinkel + Geschwindigkeit
+    float speedFactor = 0.3f + throttleNorm * 0.7f;  // Min 30%, Max 100%
+    float expectedYawRate = steeringNorm * 100.0f * speedFactor;
+    
+    // Differenz: positiv = Auto dreht mehr als erwartet (Übersteuern)
+    float yawError = imuYawRate - expectedYawRate;
+    
+    // Deadzone
+    if (abs(yawError) < stabilityParams.yawThreshold) {
+        yawError = 0.0f;
+    } else {
+        float sign = (yawError > 0) ? 1.0f : -1.0f;
+        yawError = sign * (abs(yawError) - stabilityParams.yawThreshold);
+    }
+    
+    // Gegenlenk-Korrektur: proportional zur Yaw-Fehler
+    float steerCorrection = -yawError * stabilityParams.counterSteerGain * 
+                            stabilityParams.responseSpeed;
+    
+    // Auf -1000..+1000 begrenzen und zum Fahrer-Input addieren
+    int correctedSteering = currentSteering + (int)(steerCorrection * 10.0f);
+    correctedSteering = constrain(correctedSteering, -1000, 1000);
+    
+    // Throttle-Limitierung bei Übersteuern
+    float yawExcess = abs(yawError) / 100.0f;  // 0..1 normalisiert
+    float throttleMultiplier = 1.0f - (yawExcess * stabilityParams.throttleLimitGain);
+    throttleMultiplier = constrain(throttleMultiplier, 0.1f, 1.0f);
+    
+    int correctedThrottle = (int)(currentThrottle * throttleMultiplier);
+    
+    // Output setzen
+    assistSteeringOutput = correctedSteering;
+    assistThrottleOutput = correctedThrottle;
+}
+
+// ============================================================
+// Drive Mode: Drift Autopilot
+// ============================================================
+
+void computeDriftAutopilot(float dt) {
+    // Drift Autopilot: Fahrer gibt Soll-Zustand vor, System regelt aktiv.
+    //
+    // Lenkrad-Position → Soll-Yaw-Rate (wie stark soll das Auto driften)
+    // Gaspedal → Drift-Intensität (Multiplikator + Basis-Gas)
+    
+    float steeringNorm = currentSteering / 1000.0f;  // -1..+1
+    float throttleNorm = max(0.0f, currentThrottle / 1000.0f);  // 0..1
+    
+    // Soll-Yaw-Rate aus Lenkrad ableiten
+    float desiredYawRate = steeringNorm * autopilotParams.yawRateMax;
+    
+    // Yaw-Rate Fehler (Soll vs. Ist)
+    float yawError = desiredYawRate - imuYawRate;
+    
+    // PID für Lenkung: regelt den Servo so, dass die gewünschte Yaw-Rate erreicht wird
+    steeringPID.kP = autopilotParams.steeringPID_P;
+    steeringPID.kI = autopilotParams.steeringPID_I;
+    steeringPID.kD = autopilotParams.steeringPID_D;
+    float steerOutput = steeringPID.compute(yawError, dt);
+    
+    // Steering-Output: PID-Ergebnis direkt als Servo-Position
+    assistSteeringOutput = constrain((int)steerOutput, -1000, 1000);
+    
+    // Throttle-Regelung:
+    // Soll-Intensität = Fahrer-Gas bestimmt wie aggressiv der Drift sein soll
+    // Wenn Yaw-Rate unter Soll → mehr Gas (Drift aufbauen)
+    // Wenn Yaw-Rate über Soll → weniger Gas (Drift kontrollieren)
+    float yawRateError = abs(desiredYawRate) - abs(imuYawRate);
+    
+    throttlePID.kP = autopilotParams.throttlePID_P;
+    throttlePID.kI = autopilotParams.throttlePID_I;
+    throttlePID.kD = autopilotParams.throttlePID_D;
+    float throttleCorrection = throttlePID.compute(yawRateError, dt);
+    
+    // Basis-Gas + Korrektur, skaliert mit Fahrer-Gas als Intensität
+    float baseGas = autopilotParams.baseThrottle * 1000.0f;
+    float intensity = throttleNorm;  // 0..1 vom Fahrer
+    float throttleOutput = (baseGas + throttleCorrection * 5.0f) * intensity;
+    
+    // Wenn Fahrer kein Gas gibt → kein Drift (Sicherheit)
+    if (throttleNorm < 0.05f) {
+        throttleOutput = 0;
+        steeringPID.reset();
+        throttlePID.reset();
+        assistSteeringOutput = 0;  // Neutral bei kein Gas
+    }
+    
+    assistThrottleOutput = constrain((int)throttleOutput, -1000, 1000);
+}
+
+// ============================================================
+// Drive Mode: Update (aufgerufen im Loop)
+// ============================================================
+
+void updateDriveAssist() {
+    if (!imuAvailable || currentDriveMode == MODE_DIRECT) {
+        // Direct-Mode: keine Änderung, Fahrer-Input geht 1:1 durch
+        assistSteeringOutput = currentSteering;
+        assistThrottleOutput = currentThrottle;
+        return;
+    }
+    
+    // dt berechnen
+    unsigned long now = millis();
+    float dt = (now - lastAssistUpdate) / 1000.0f;
+    if (dt <= 0 || dt > 0.1f) dt = 0.01f;  // Sanity check
+    lastAssistUpdate = now;
+    
+    switch (currentDriveMode) {
+        case MODE_STABILITY:
+            computeStabilityAssist(dt);
+            break;
+        case MODE_AUTOPILOT:
+            computeDriftAutopilot(dt);
+            break;
+        default:
+            assistSteeringOutput = currentSteering;
+            assistThrottleOutput = currentThrottle;
+            break;
+    }
 }
 
 // ============================================================
@@ -721,9 +975,18 @@ void loop() {
     if (millis() - lastSmoothUpdate >= 1) {  // ~1000Hz Update-Rate
         lastSmoothUpdate = millis();
         
-        // Exponentielles Smoothing (Lowpass-Filter)
-        smoothSteering += (targetSteering - smoothSteering) * STEERING_SMOOTHING;
-        smoothThrottle += (targetThrottle - smoothThrottle) * THROTTLE_SMOOTHING;
+        // Drive Assist berechnen (nutzt IMU + Fahrer-Input → assistSteeringOutput/assistThrottleOutput)
+        if (imuAvailable) {
+            readIMU();
+            updateDriveAssist();
+        } else {
+            assistSteeringOutput = targetSteering;
+            assistThrottleOutput = targetThrottle;
+        }
+        
+        // Exponentielles Smoothing auf den Assist-Output
+        smoothSteering += (assistSteeringOutput - smoothSteering) * STEERING_SMOOTHING;
+        smoothThrottle += (assistThrottleOutput - smoothThrottle) * THROTTLE_SMOOTHING;
         
         // Steering Servo updaten
         int steerPulse = map((int)smoothSteering, -1000, 1000, 1000, 2000);
@@ -734,7 +997,7 @@ void loop() {
             const ESCProfile& profile = escProfiles[currentPlatform];
             
             // Traxxas Rückwärts State-Machine
-            if (profile.needsBrakeBeforeReverse && targetThrottle < 0) {
+            if (profile.needsBrakeBeforeReverse && assistThrottleOutput < 0) {
                 if (reverseState == REVERSE_BRAKE_SENT) {
                     int brakePulse = mapToPulse((int)smoothThrottle, profile.minPulse, profile.neutralPulse, profile.maxPulse);
                     throttleServo.writeMicroseconds(brakePulse);
@@ -781,9 +1044,8 @@ void loop() {
         lastBlink = millis();
     }
     
-    // IMU lesen und streamen (100Hz)
+    // IMU-Daten streamen (100Hz) — Reading passiert bereits im Smoothing-Loop
     if (imuAvailable && millis() - lastImuSend >= IMU_SEND_INTERVAL) {
-        readIMU();
         sendIMUData();
         lastImuSend = millis();
     }
