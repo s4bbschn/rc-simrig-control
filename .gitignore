@@ -1,0 +1,24 @@
+# PlatformIO
+esp32-esc-controller/.pio/
+esp32-esc-controller/.vscode/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+venv/
+.venv/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets (falls jemand Passwörter in Config-Files hat)
+# config.json wird BEWUSST committed als Template

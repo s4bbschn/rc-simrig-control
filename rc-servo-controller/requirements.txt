@@ -1,0 +1,4 @@
+flask==3.0.0
+pigpio==1.78
+evdev==1.7.0
+websocket-client==1.7.0
