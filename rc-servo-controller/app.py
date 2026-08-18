@@ -99,13 +99,17 @@ def compute_servo(value, s):
     if input_scale != 1.0:
         v = v * input_scale
     v = max(s.get("endpoint_low", -1), min(s.get("endpoint_high", 1), v))
-    # Pulsweite
+    # Trim als normalisierten Offset anwenden
+    # Trim ist in µs, Servo-Range ist ca. 1000µs (500 pro Seite von Center)
     trim = s.get("trim", 0)
-    center = s.get("center_pulse", 1450) + trim
+    trim_normalized = trim / 500.0  # ±500µs max → ±1.0
+    v_with_trim = max(-1.0, min(1.0, v + trim_normalized))
+    # Pulsweite (mit Trim)
+    center = s.get("center_pulse", 1450)
     min_p, max_p = s.get("min_pulse", 500), s.get("max_pulse", 2400)
-    pulse = center + v * (max_p - center) if v >= 0 else center + v * (center - min_p)
+    pulse = center + v_with_trim * (max_p - center) if v_with_trim >= 0 else center + v_with_trim * (center - min_p)
     pulse = max(min_p, min(max_p, int(pulse)))
-    return {"value": round(v, 3), "pulse": pulse, "input_raw": round(value, 3)}
+    return {"value": round(v_with_trim, 3), "pulse": pulse, "input_raw": round(value, 3)}
 
 
 def on_axis_input(axis_code, value):

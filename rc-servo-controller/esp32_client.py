@@ -145,7 +145,10 @@ class ESP32Client:
             return False
 
     def _send_loop(self):
-        """Sendet pending Werte mit Rate-Limiting (50Hz max)."""
+        """Sendet pending Werte mit Rate-Limiting (50Hz max) + Heartbeat."""
+        heartbeat_interval = 0.5  # Alle 500ms den aktuellen Wert erneut senden
+        last_heartbeat = 0
+
         while self._running:
             now = time.time()
             if now - self._last_send_time >= self._min_send_interval:
@@ -166,8 +169,18 @@ class ESP32Client:
                         self._last_throttle = val
                         self._send_raw({"cmd": "throttle", "value": val})
                         sent = True
+
+                # Heartbeat: aktuelle Werte erneut senden damit ESP32 Failsafe nicht greift
+                if not sent and now - last_heartbeat >= heartbeat_interval:
+                    if self._last_steering is not None:
+                        self._send_raw({"cmd": "steer", "value": self._last_steering})
+                    if self._last_throttle is not None:
+                        self._send_raw({"cmd": "throttle", "value": self._last_throttle})
+                    last_heartbeat = now
+
                 if sent:
                     self._last_send_time = now
+                    last_heartbeat = now
             time.sleep(0.005)  # 5ms sleep, 200Hz check-rate
 
     # ============================
