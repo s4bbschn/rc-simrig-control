@@ -34,7 +34,7 @@
 // IMU (MPU6050 / MPU9250) — I²C
 #define IMU_SDA_PIN         21   // Standard I²C SDA
 #define IMU_SCL_PIN         22   // Standard I²C SCL
-#define IMU_SEND_INTERVAL   10   // IMU-Daten alle 10ms senden (100Hz)
+#define IMU_SEND_INTERVAL   50   // IMU-Daten alle 50ms senden (20Hz) — schont WebSocket
 
 // ============================================================
 // PWM-Einstellungen
@@ -652,6 +652,10 @@ void readIMU() {
 void sendIMUData() {
     if (!imuAvailable || ws.count() == 0) return;
     
+    // Nur senden wenn die Clients nicht überlastet sind — sonst überspringen.
+    // Verhindert "Too many messages queued" und Verbindungsabbrüche.
+    if (!ws.availableForWriteAll()) return;
+    
     // Kompaktes JSON für minimale Latenz
     char json[128];
     snprintf(json, sizeof(json),
@@ -975,10 +979,15 @@ void loop() {
     if (millis() - lastSmoothUpdate >= 1) {  // ~1000Hz Update-Rate
         lastSmoothUpdate = millis();
         
-        // Drive Assist berechnen (nutzt IMU + Fahrer-Input → assistSteeringOutput/assistThrottleOutput)
+        // Drive Assist: IMU nur alle 10ms lesen (I²C-Read blockiert sonst den Loop
+        // und lässt WiFi/WebSocket absterben). Assist-Berechnung ebenfalls 100Hz.
+        static unsigned long lastImuRead = 0;
         if (imuAvailable) {
-            readIMU();
-            updateDriveAssist();
+            if (millis() - lastImuRead >= 10) {  // 100Hz
+                lastImuRead = millis();
+                readIMU();
+                updateDriveAssist();
+            }
         } else {
             assistSteeringOutput = targetSteering;
             assistThrottleOutput = targetThrottle;
