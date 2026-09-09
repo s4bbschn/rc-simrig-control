@@ -236,6 +236,10 @@ class ESP32Client:
         msg.update(params)
         self._send_raw(msg)
 
+    def calibrate_imu(self):
+        """IMU-Kalibrierung am ESP32 auslösen."""
+        self._send_raw({"cmd": "calibrate_imu"})
+
     @property
     def status(self) -> dict:
         return {

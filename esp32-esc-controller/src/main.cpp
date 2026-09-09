@@ -150,6 +150,12 @@ float accelOffsetY = 0.0f;
 const float GYRO_SCALE = 131.0f;   // für ±250°/s
 const float ACCEL_SCALE = 16384.0f; // für ±2g
 
+// IMU Forward Declarations (werden im WebSocket-Handler + API genutzt)
+void calibrateIMU();
+bool initIMU();
+void readIMU();
+void sendIMUData();
+
 // ============================================================
 // Drive Modes & Drift Assist
 // ============================================================
@@ -437,6 +443,11 @@ void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
                     autopilotParams.baseThrottle = doc["baseThrottle"] | autopilotParams.baseThrottle;
                     Serial.println("[MODE] Autopilot-Parameter aktualisiert");
                 }
+                else if (strcmp(cmd, "calibrate_imu") == 0) {
+                    if (imuAvailable) {
+                        calibrateIMU();
+                    }
+                }
                 
                 // Ack senden bei Befehlen die nicht hochfrequent sind
                 if (strcmp(cmd, "arm") == 0 || strcmp(cmd, "disarm") == 0 || 
@@ -464,12 +475,6 @@ void onWebSocketEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
 // ============================================================
 // REST API (für zukünftige Pi-Integration)
 // ============================================================
-
-// Forward declarations
-void calibrateIMU();
-bool initIMU();
-void readIMU();
-void sendIMUData();
 
 void setupAPI() {
     // Status abrufen

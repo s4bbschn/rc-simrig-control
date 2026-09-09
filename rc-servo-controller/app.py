@@ -409,13 +409,10 @@ def api_ffb_config():
 
 @app.route("/api/ffb/calibrate", methods=["POST"])
 def api_ffb_calibrate():
-    """IMU-Kalibrierung am ESP32 auslösen."""
+    """IMU-Kalibrierung am ESP32 auslösen (per WebSocket)."""
     if esp32_client and esp32_client.connected:
-        import urllib.request
         try:
-            host = esp32_client.host
-            req = urllib.request.Request(f"http://{host}/api/imu/calibrate", method="POST")
-            urllib.request.urlopen(req, timeout=5)
+            esp32_client.calibrate_imu()
             return jsonify({"status": "ok"})
         except Exception as e:
             return jsonify({"status": "error", "message": str(e)}), 500
