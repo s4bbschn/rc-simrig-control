@@ -28,6 +28,16 @@ try:
 except ImportError as e:
     print(f"[INFO] FFB nicht verfügbar: {e}")
 
+# Display-Menü (E-Paper + Lenkrad-Tasten)
+HAS_MENU = False
+display_menu = None
+try:
+    from display_menu import DisplayMenu
+    HAS_MENU = True
+    print("[OK] Display-Menü verfügbar")
+except ImportError as e:
+    print(f"[INFO] Display-Menü nicht verfügbar: {e}")
+
 # Servo-Steuerung (nur auf Raspberry Pi, als Fallback wenn kein ESP32)
 HAS_GPIO = False
 servo_ctrl = None
@@ -246,6 +256,110 @@ def setup_ffb(cfg):
     ffb_controller.start()
 
 
+# ============================================================
+# Display-Menü Integration
+# ============================================================
+
+def _menu_get_config():
+    """Callback fuer das Menue: aktuelle Config."""
+    return _config_cache if _config_cache else load_config()
+
+
+def _menu_set_value(path, value):
+    """Callback fuer das Menue: verschachtelten Wert setzen + speichern.
+    Live-Aenderung wirkt sofort (gleiche Logik wie Web-UI)."""
+    with config_lock:
+        cfg = load_config()
+        node = cfg
+        for p in path[:-1]:
+            node = node[p]
+        node[path[-1]] = value
+        save_config(cfg)
+        setup_servos(cfg)
+    print(f"[MENU] {'/'.join(map(str, path))} = {value}")
+
+
+def _menu_do_action(name, arg):
+    """Callback fuer das Menue: ESP32-Aktionen + Assist-Parameter senden."""
+    cfg = _config_cache or load_config()
+    if name == "arm":
+        if esp32_client and esp32_client.connected:
+            esp32_client.arm()
+    elif name == "disarm":
+        if esp32_client and esp32_client.connected:
+            esp32_client.disarm()
+    elif name == "calibrate":
+        if esp32_client and esp32_client.connected:
+            esp32_client.calibrate_imu()
+    elif name == "set_mode":
+        mode = arg if arg is not None else cfg.get("drive_assist", {}).get("mode", 0)
+        if esp32_client and esp32_client.connected:
+            esp32_client.set_drive_mode(int(mode))
+    elif name == "stability":
+        if esp32_client and esp32_client.connected:
+            esp32_client.set_stability_params(cfg.get("drive_assist", {}).get("stability", {}))
+    elif name == "autopilot":
+        if esp32_client and esp32_client.connected:
+            esp32_client.set_autopilot_params(cfg.get("drive_assist", {}).get("autopilot", {}))
+    elif name == "ffb":
+        if ffb_controller:
+            ffb_controller.update_config(cfg.get("ffb", {}))
+        elif cfg.get("ffb", {}).get("enabled") and HAS_FFB:
+            setup_ffb(cfg)
+    print(f"[MENU] Aktion: {name}" + (f" ({arg})" if arg is not None else ""))
+
+
+def setup_display_menu(cfg):
+    """Startet das Display-Menü mit Lenkrad-Tasten in einem Hintergrund-Thread."""
+    global display_menu
+    if not HAS_MENU:
+        return
+    menu_cfg = cfg.get("display", {})
+    if not menu_cfg.get("enabled", True):
+        print("[MENU] Deaktiviert per Config")
+        return
+
+    try:
+        display_menu = DisplayMenu(_menu_get_config, _menu_set_value,
+                                   _menu_do_action, simulate=False)
+        display_menu.start()
+    except Exception as e:
+        print(f"[MENU] Display-Init fehlgeschlagen: {e}")
+        display_menu = None
+        return
+
+    # Button-Events vom Lenkrad in einem eigenen Thread lesen
+    def _menu_button_loop():
+        import evdev
+        from evdev import ecodes
+        # Auf das Lenkrad warten (kann beim Boot noch nicht da sein)
+        dev = None
+        for _ in range(30):
+            for p in evdev.list_devices():
+                d = evdev.InputDevice(p)
+                n = d.name.lower()
+                if any(k in n for k in ("logitech", "wheel", "force", "driving")):
+                    dev = d
+                    break
+            if dev:
+                break
+            time.sleep(1)
+        if not dev:
+            print("[MENU] Kein Lenkrad fuer Menue-Buttons gefunden")
+            return
+        print(f"[MENU] Button-Input aktiv: {dev.name}")
+        try:
+            for event in dev.read_loop():
+                if event.type == ecodes.EV_KEY and event.value == 1:
+                    display_menu.handle_button(event.code)
+        except Exception as e:
+            print(f"[MENU] Button-Loop beendet: {e}")
+
+    import time
+    threading.Thread(target=_menu_button_loop, daemon=True).start()
+    print("[MENU] Display-Menü gestartet")
+
+
 def start_input(cfg):
     global input_reader
     if not HAS_INPUT:
@@ -426,6 +540,7 @@ if __name__ == "__main__":
     setup_servos(cfg)
     setup_esp32(cfg)
     setup_ffb(cfg)
+    setup_display_menu(cfg)
     start_input(cfg)
     print(f"\n🏎️  RC Servo Controller → http://localhost:8080\n")
     app.run(host="0.0.0.0", port=8080, debug=False)

@@ -7,6 +7,9 @@
     "port": 80,
     "platform": 0
   },
+  "display": {
+    "enabled": true
+  },
   "ffb": {
     "enabled": false,
     "sensor_type": "mpu6050",
